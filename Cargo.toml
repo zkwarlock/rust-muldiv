@@ -21,6 +21,7 @@ include = [
 edition = "2018"
 
 [dependencies]
+ethnum = "1.0.3"
 
 [dev-dependencies]
 quickcheck = "0.9"
