@@ -38,6 +38,11 @@ use core::i32;
 use core::i64;
 use core::i8;
 
+use core::cmp;
+
+mod u128_muldiv;
+use u128_muldiv::{u128_scale, U256};
+
 /// Trait for calculating `val * num / denom` with different rounding modes and overflow
 /// protection.
 ///
@@ -145,6 +150,116 @@ pub trait MulDiv<RHS = Self> {
     /// # }
     /// ```
     fn mul_div_ceil(self, num: RHS, denom: RHS) -> Option<Self::Output>;
+}
+
+impl MulDiv for u128 {
+    type Output = u128;
+
+    fn mul_div_floor(self, num: u128, denom: u128) -> Option<u128> {
+        assert_ne!(denom, 0);
+        u128_scale(self, num, denom, 0)
+    }
+
+    fn mul_div_round(self, num: u128, denom: u128) -> Option<u128> {
+        assert_ne!(denom, 0);
+        u128_scale(self, num, denom, denom >> 1)
+    }
+
+    fn mul_div_ceil(self, num: u128, denom: u128) -> Option<u128> {
+        assert_ne!(denom, 0);
+        u128_scale(self, num, denom, denom - 1)
+    }
+}
+
+impl MulDiv for i128 {
+    type Output = i128;
+
+    fn mul_div_floor(self, num: i128, denom: i128) -> Option<i128> {
+        assert_ne!(denom, 0);
+
+        let sgn = self.signum() * num.signum() * denom.signum();
+
+        let min_val: u128 = 1 << (128 - 1);
+        let abs = |x: i128| if x != i128::MIN {
+            x.abs() as u128
+        } else {
+            min_val
+        };
+
+        let self_u = abs(self);
+        let num_u = abs(num);
+        let denom_u = abs(denom);
+
+        if sgn < 0 {
+            self_u.mul_div_ceil(num_u, denom_u)
+        } else {
+            self_u.mul_div_floor(num_u, denom_u)
+        }.and_then(|r| if r <= i128::MAX as u128 {
+            Some(sgn * (r as i128))
+        } else if sgn < 0 && r == min_val {
+            Some(i128::MIN)
+        } else {
+            None
+        })
+    }
+
+    fn mul_div_round(self, num: i128, denom: i128) -> Option<i128> {
+        assert_ne!(denom, 0);
+
+        let sgn = self.signum() * num.signum() * denom.signum();
+
+        let min_val: u128 = 1 << (128 - 1);
+        let abs = |x: i128| if x != i128::MIN {
+            x.abs() as u128
+        } else {
+            min_val
+        };
+
+        let self_u = abs(self);
+        let num_u = abs(num);
+        let denom_u = abs(denom);
+
+        if sgn < 0 {
+            u128_scale(self_u, num_u, denom_u, cmp::max(denom_u >> 1, 1) - 1)
+        } else {
+            self_u.mul_div_round(num_u, denom_u)
+        }.and_then(|r| if r <= i128::MAX as u128 {
+            Some(sgn * (r as i128))
+        } else if sgn < 0 && r == min_val {
+            Some(i128::MIN)
+        } else {
+            None
+        })
+    }
+
+    fn mul_div_ceil(self, num: i128, denom: i128) -> Option<i128> {
+        assert_ne!(denom, 0);
+
+        let sgn = self.signum() * num.signum() * denom.signum();
+
+        let min_val: u128 = 1 << (128 - 1);
+        let abs = |x: i128| if x != i128::MIN {
+            x.abs() as u128
+        } else {
+            min_val
+        };
+
+        let self_u = abs(self);
+        let num_u = abs(num);
+        let denom_u = abs(denom);
+
+        if sgn < 0 {
+            self_u.mul_div_floor(num_u, denom_u)
+        } else {
+            self_u.mul_div_ceil(num_u, denom_u)
+        }.and_then(|r| if r <= i128::MAX as u128 {
+            Some(sgn * (r as i128))
+        } else if sgn < 0 && r == min_val {
+            Some(i128::MIN)
+        } else {
+            None
+        })
+    }
 }
 
 macro_rules! mul_div_impl_unsigned {
@@ -266,6 +381,80 @@ mul_div_impl_unsigned!(u16, u32);
 mul_div_impl_unsigned!(u8, u16);
 
 // FIXME: https://github.com/rust-lang/rust/issues/12249
+#[cfg(test)]
+mod muldiv_u128_tests {
+    
+    use super::*;
+
+    use quickcheck::{quickcheck, Arbitrary, Gen};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct NonZero(u128);
+
+    impl Arbitrary for NonZero {
+        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+            loop {
+                let v = u128::arbitrary(g);
+                if v != 0 {
+                    return NonZero(v);
+                }
+            }
+        }
+    }
+
+    quickcheck! {
+        fn scale_floor(val: u128, num: u128, den: NonZero) -> bool {
+            let res = val.mul_div_floor(num, den.0);
+
+            let expected = ((val as $u) * (num as $u)) / (den.0 as $u);
+
+            if expected > u128::MAX as $u {
+                res.is_none()
+            } else {
+                res == Some(expected as u128)
+            }
+        }
+    }
+
+    quickcheck! {
+        fn scale_round(val: u128, num: u128, den: NonZero) -> bool {
+            let res = val.mul_div_round(num, den.0);
+
+            let mut expected = ((val as $u) * (num as $u)) / (den.0 as $u);
+            let expected_rem = ((val as $u) * (num as $u)) % (den.0 as $u);
+
+            if expected_rem >= ((den.0 as $u) + 1) >> 1 {
+                expected += 1
+            }
+
+            if expected > u128::MAX as $u {
+                res.is_none()
+            } else {
+                res == Some(expected as u128)
+            }
+        }
+    }
+
+    quickcheck! {
+        fn scale_ceil(val: u128, num: u128, den: NonZero) -> bool {
+            let res = val.mul_div_ceil(num, den.0);
+
+            let mut expected = ((val as $u) * (num as $u)) / (den.0 as $u);
+            let expected_rem = ((val as $u) * (num as $u)) % (den.0 as $u);
+
+            if expected_rem != 0 {
+                expected += 1
+            }
+
+            if expected > u128::MAX as $u {
+                res.is_none()
+            } else {
+                res == Some(expected as u128)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod muldiv_u64_tests {
     mul_div_impl_unsigned_tests!(u64, u128);
